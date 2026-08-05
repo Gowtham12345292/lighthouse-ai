@@ -20,7 +20,7 @@ import random
 from lighthouse import Lighthouse
 
 # Initialize with debug=True to see traces in console
-lh = Lighthouse(api_key="lh_demo_key", debug=True)
+lh = Lighthouse(api_key="lh-test-key-123", endpoint="http://localhost:8000", debug=True)
 
 
 def fake_llm_call(prompt: str, should_fail: bool = False) -> str:

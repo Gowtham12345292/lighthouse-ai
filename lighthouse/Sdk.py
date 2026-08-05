@@ -23,17 +23,9 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from queue import Queue, Empty
 from typing import Any, Callable, Optional
+from urllib.request import Request, urlopen
 
 logger = logging.getLogger("lighthouse")
-
-# ── Context management ──────────────────────────────────────────────
-# This is the core trick: a ContextVar holds the current span stack.
-# When you open a span, it pushes onto the stack. When you close it,
-# it pops. Child spans automatically know their parent because they
-# peek at the top of the stack before pushing themselves.
-#
-# ContextVar is thread-safe and async-safe — each thread/task gets
-# its own copy, so concurrent agent runs don't cross-contaminate.
 
 _current_trace: ContextVar[Optional["TraceContext"]] = ContextVar(
     "_current_trace", default=None
@@ -47,7 +39,7 @@ class SpanData:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:16])
     trace_id: str = ""
     parent_span_id: Optional[str] = None
-    span_type: str = "generic"  # llm_call | tool_call | retrieval | generic
+    span_type: str = "generic"
     name: str = ""
     model: Optional[str] = None
     input: Optional[Any] = None
@@ -130,7 +122,6 @@ class Span:
         if tokens_out is not None:
             self._data.tokens_out = tokens_out
         if tokens is not None and tokens_in is None and tokens_out is None:
-            # Convenience: single "tokens" param sets tokens_out
             self._data.tokens_out = tokens
         if error is not None:
             self._data.error = error
@@ -148,7 +139,6 @@ class Span:
         if exc_val and not self._data.error:
             self._data.error = f"{exc_type.__name__}: {exc_val}"
         self._trace_ctx.pop_span()
-        # Never suppress exceptions — fail-open means we don't interfere
         return False
 
 
@@ -180,28 +170,16 @@ class Lighthouse:
         if debug:
             logging.basicConfig(level=logging.DEBUG)
 
-        # Background flush thread — daemon so it dies with the process
         self._flush_thread = threading.Thread(
             target=self._flush_loop, daemon=True, name="lighthouse-flush"
         )
         self._flush_thread.start()
 
-        # Flush remaining spans on exit
         atexit.register(self._flush_remaining)
 
     # ── Public API ──────────────────────────────────────────────────
 
     def trace(self, func: Callable | None = None, *, name: str | None = None):
-        """
-        Decorator that wraps a function as a traced agent run.
-
-            @lh.trace
-            def run_agent(query): ...
-
-            @lh.trace(name="custom-name")
-            def run_agent(query): ...
-        """
-        # Handle both @lh.trace and @lh.trace(name="...")
         if func is None:
             return lambda f: self.trace(f, name=name)
 
@@ -220,7 +198,7 @@ class Lighthouse:
             except Exception as e:
                 ctx.status = "error"
                 ctx.error = f"{type(e).__name__}: {e}"
-                raise  # Re-raise — we never swallow user exceptions
+                raise
             finally:
                 ctx.ended_at = datetime.now(timezone.utc).isoformat()
                 _current_trace.reset(token)
@@ -235,16 +213,8 @@ class Lighthouse:
         span_type: str = "generic",
         model: str | None = None,
     ):
-        """
-        Open a span inside a traced function.
-
-            with lh.span("llm_call", model="claude-sonnet-4-6") as s:
-                ...
-                s.record(input=prompt, output=response)
-        """
         ctx = _current_trace.get()
         if ctx is None:
-            # No active trace — fail-open, yield a dummy span
             logger.debug("lh.span() called outside @lh.trace — skipping")
             yield Span(SpanData(), TraceContext("", ""))
             return
@@ -256,7 +226,6 @@ class Lighthouse:
             with span_handle as s:
                 yield s
         except Exception:
-            # Let the Span.__exit__ record the error, then re-raise
             raise
 
     # ── Internal: export & flush ────────────────────────────────────
@@ -264,14 +233,38 @@ class Lighthouse:
     def _export_trace(self, ctx: TraceContext) -> None:
         """Queue a completed trace for background export. Never raises."""
         try:
+            api_spans = []
+            for s in ctx.completed_spans:
+                api_span = {
+                    "span_id": s.id,
+                    "name": s.name,
+                    "span_type": s.span_type,
+                    "started_at": s.started_at,
+                    "ended_at": s.ended_at,
+                    "duration_ms": s.latency_ms,
+                }
+                if s.parent_span_id:
+                    api_span["parent_span_id"] = s.parent_span_id
+                if s.input is not None:
+                    api_span["input"] = s.input
+                if s.output is not None:
+                    api_span["output"] = s.output
+                if s.error:
+                    api_span["error"] = s.error
+                if s.tokens_in is not None or s.tokens_out is not None:
+                    api_span["token_usage"] = {
+                        "tokens_in": s.tokens_in,
+                        "tokens_out": s.tokens_out,
+                    }
+                api_spans.append(api_span)
+
             trace_data = {
                 "trace_id": ctx.trace_id,
                 "name": ctx.name,
                 "status": ctx.status,
-                "error": ctx.error,
                 "started_at": ctx.started_at,
                 "ended_at": ctx.ended_at,
-                "spans": [s.to_dict() for s in ctx.completed_spans],
+                "spans": api_spans,
             }
 
             if self._debug:
@@ -281,21 +274,29 @@ class Lighthouse:
                     ctx.status,
                     len(ctx.completed_spans),
                 )
-                print(_format_trace(trace_data))
+                display_data = {
+                    "trace_id": ctx.trace_id,
+                    "name": ctx.name,
+                    "status": ctx.status,
+                    "error": ctx.error,
+                    "started_at": ctx.started_at,
+                    "ended_at": ctx.ended_at,
+                    "spans": [s.to_dict() for s in ctx.completed_spans],
+                }
+                print(_format_trace(display_data))
 
             self._queue.put(trace_data)
         except Exception:
-            # Fail-open: swallow any export error
             logger.debug("Failed to export trace", exc_info=True)
 
     def _flush_loop(self) -> None:
-        """Background thread: flush queued traces every N seconds or M items."""
+        """Background thread: flush queued traces every N seconds."""
         while True:
             time.sleep(self._flush_interval)
             self._flush_batch()
 
     def _flush_batch(self) -> None:
-        """Drain the queue and send to the backend (or print in debug mode)."""
+        """Drain the queue and send to the backend."""
         batch: list[dict] = []
         while len(batch) < self._batch_size:
             try:
@@ -307,10 +308,23 @@ class Lighthouse:
         if not batch:
             return
 
-        # TODO: Replace with actual HTTP POST to self.endpoint + "/v1/traces"
-        # For now, just log in debug mode
-        if self._debug:
-            logger.debug("Flushing %d traces to %s", len(batch), self.endpoint)
+        for trace_data in batch:
+            try:
+                payload = json.dumps(trace_data).encode("utf-8")
+                req = Request(
+                    f"{self.endpoint}/v1/traces",
+                    data=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-API-Key": self.api_key,
+                    },
+                    method="POST",
+                )
+                with urlopen(req, timeout=5) as resp:
+                    if self._debug:
+                        logger.debug("Flushed trace %s — %s", trace_data["trace_id"], resp.status)
+            except Exception:
+                logger.debug("Failed to flush trace", exc_info=True)
 
     def _flush_remaining(self) -> None:
         """Called at process exit via atexit."""
@@ -344,7 +358,6 @@ def _format_trace(trace_data: dict) -> str:
         lines.append(f"  Error: {trace_data['error']}")
         lines.append("─" * 60)
 
-    # Build a parent→children map to show nesting
     spans = trace_data.get("spans", [])
     for i, span in enumerate(spans):
         indent = "  "
