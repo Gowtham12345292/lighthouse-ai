@@ -50,6 +50,10 @@ class SpanData:
     error: Optional[str] = None
     started_at: str = ""
     ended_at: str = ""
+    retrieval_query: Optional[str] = None
+    retrieval_chunks: Optional[Any] = None
+    retrieval_scores: Optional[list[float]] = None
+    retrieval_top_k: Optional[int] = None
 
     def to_dict(self) -> dict:
         """Serialize for export, dropping None values to keep payloads small."""
@@ -125,6 +129,22 @@ class Span:
             self._data.tokens_out = tokens
         if error is not None:
             self._data.error = error
+
+    def log_retrieval(
+        self,
+        query: str,
+        chunks: list[dict | str],
+        scores: list[float] | None = None,
+        top_k: int | None = None,
+    ) -> None:
+        """Log RAG retrieval data into this span."""
+        self._data.span_type = "retrieval"
+        self._data.input = _safe_serialize(query)
+        self._data.output = _safe_serialize(chunks)
+        self._data.retrieval_query = query
+        self._data.retrieval_chunks = _safe_serialize(chunks)
+        self._data.retrieval_scores = scores
+        self._data.retrieval_top_k = top_k
 
     def __enter__(self) -> "Span":
         self._start_time = time.monotonic()
@@ -256,6 +276,13 @@ class Lighthouse:
                         "tokens_in": s.tokens_in,
                         "tokens_out": s.tokens_out,
                     }
+                if s.retrieval_query is not None:
+                    api_span["retrieval"] = {
+                        "query": s.retrieval_query,
+                        "chunks": s.retrieval_chunks,
+                        "scores": s.retrieval_scores,
+                        "top_k": s.retrieval_top_k,
+                    }
                 api_spans.append(api_span)
 
             trace_data = {
@@ -384,6 +411,9 @@ def _format_trace(trace_data: dict) -> str:
         if span.get("output"):
             out = str(span["output"])[:80]
             lines.append(f"{indent}     Output: {out}")
+
+        if span.get("retrieval_scores"):
+            lines.append(f"{indent}     Scores: {span['retrieval_scores']}")
 
     lines.append("═" * 60)
     lines.append("")

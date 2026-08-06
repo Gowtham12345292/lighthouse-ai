@@ -67,6 +67,10 @@ async def ingest_trace(
             duration_ms=s.duration_ms,
             token_usage_json=json.dumps(s.token_usage) if s.token_usage else None,
             error_text=s.error,
+            retrieval_query=s.retrieval.query if s.retrieval else None,
+            retrieval_chunks_json=json.dumps(s.retrieval.chunks) if s.retrieval and s.retrieval.chunks else None,
+            retrieval_scores_json=json.dumps(s.retrieval.scores) if s.retrieval and s.retrieval.scores else None,
+            retrieval_top_k=s.retrieval.top_k if s.retrieval else None,
         )
         db.add(span)
 

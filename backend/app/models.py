@@ -58,5 +58,9 @@ class Span(Base):
     duration_ms: Mapped[float] = mapped_column(Float, nullable=True)
     token_usage_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retrieval_query: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retrieval_chunks_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retrieval_scores_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retrieval_top_k: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     trace: Mapped["Trace"] = relationship(back_populates="spans")
