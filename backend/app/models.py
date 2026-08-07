@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Text, DateTime, Integer, ForeignKey, Float
+from sqlalchemy import String, Text, DateTime, Integer, ForeignKey, Float, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -64,3 +64,20 @@ class Span(Base):
     retrieval_top_k: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     trace: Mapped["Trace"] = relationship(back_populates="spans")
+
+
+class Alert(Base):
+    __tablename__ = "alerts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id"))
+    trace_id: Mapped[str] = mapped_column(String(36), ForeignKey("traces.id"))
+    alert_type: Mapped[str] = mapped_column(String(50))
+    severity: Mapped[str] = mapped_column(String(20), default="warning")
+    message: Mapped[str] = mapped_column(Text)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    acknowledged: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    project: Mapped["Project"] = relationship()
+    trace: Mapped["Trace"] = relationship()

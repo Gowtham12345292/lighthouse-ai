@@ -4,7 +4,7 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db, engine, Base
-from app.models import Project, Trace, Span
+from app.models import Project, Trace, Span, Alert
 from app.schemas import TraceIn, TraceOut
 
 app = FastAPI(title="Lighthouse AI", version="0.1.0")
@@ -74,6 +74,19 @@ async def ingest_trace(
         )
         db.add(span)
 
+    # Auto-create alert on critical traces
+    if payload.status == "error":
+        error_spans = [s for s in payload.spans if s.error]
+        error_msg = error_spans[0].error if error_spans else "Unknown error"
+        alert = Alert(
+            project_id=project.id,
+            trace_id=trace.id,
+            alert_type="trace_error",
+            severity="critical",
+            message=f"Agent '{payload.name}' failed: {error_msg}",
+        )
+        db.add(alert)
+
     await db.commit()
     return {"id": trace.id, "trace_id": trace.trace_id, "spans_ingested": len(payload.spans)}
 
@@ -103,4 +116,30 @@ async def list_traces(
             span_count=len(t.spans),
         )
         for t in traces
+    ]
+
+
+@app.get("/v1/alerts")
+async def list_alerts(
+    project: Project = Depends(get_project),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Alert)
+        .where(Alert.project_id == project.id)
+        .order_by(Alert.created_at.desc())
+        .limit(50)
+    )
+    alerts = result.scalars().all()
+    return [
+        {
+            "id": a.id,
+            "trace_id": a.trace_id,
+            "alert_type": a.alert_type,
+            "severity": a.severity,
+            "message": a.message,
+            "acknowledged": a.acknowledged,
+            "created_at": a.created_at.isoformat(),
+        }
+        for a in alerts
     ]
