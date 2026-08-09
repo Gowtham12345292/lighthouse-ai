@@ -1,6 +1,7 @@
 import json
-from fastapi import FastAPI, Header, HTTPException, Depends
-from sqlalchemy import select, func
+from datetime import datetime, timezone
+from fastapi import FastAPI, Header, HTTPException, Depends, Query
+from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db, engine, Base
@@ -74,7 +75,6 @@ async def ingest_trace(
         )
         db.add(span)
 
-    # Auto-create alert on critical traces
     if payload.status == "error":
         error_spans = [s for s in payload.spans if s.error]
         error_msg = error_spans[0].error if error_spans else "Unknown error"
@@ -95,14 +95,21 @@ async def ingest_trace(
 async def list_traces(
     project: Project = Depends(get_project),
     db: AsyncSession = Depends(get_db),
+    since: str | None = Query(default=None),
+    limit: int = Query(default=20, le=100),
 ):
-    result = await db.execute(
+    query = (
         select(Trace)
         .where(Trace.project_id == project.id)
         .options(selectinload(Trace.spans))
         .order_by(Trace.created_at.desc())
-        .limit(20)
+        .limit(limit)
     )
+    if since:
+        since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        query = query.where(Trace.created_at > since_dt)
+
+    result = await db.execute(query)
     traces = result.scalars().all()
     return [
         TraceOut(
