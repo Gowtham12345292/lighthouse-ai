@@ -1,4 +1,7 @@
 import json
+import os
+import threading
+from urllib.request import Request, urlopen
 from datetime import datetime, timezone
 from fastapi import FastAPI, Header, HTTPException, Depends, Query
 from sqlalchemy import select
@@ -20,6 +23,21 @@ async def startup():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+def fire_webhook(payload: dict) -> None:
+    """Fire webhook in background thread — never blocks ingest."""
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req = Request(
+            "http://n8n:5678/webhook/lighthouse-sentinel",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urlopen(req, timeout=3)
+    except Exception:
+        pass
 
 
 async def get_project(
@@ -86,6 +104,19 @@ async def ingest_trace(
             message=f"Agent '{payload.name}' failed: {error_msg}",
         )
         db.add(alert)
+        webhook_payload = {
+            "trace_id": trace.trace_id,
+            "agent_name": payload.name,
+            "status": payload.status,
+            "error": error_msg,
+            "started_at": payload.started_at.isoformat(),
+            "span_count": len(payload.spans),
+        }
+        threading.Thread(
+            target=fire_webhook,
+            args=(webhook_payload,),
+            daemon=True,
+        ).start()
 
     await db.commit()
     return {"id": trace.id, "trace_id": trace.trace_id, "spans_ingested": len(payload.spans)}
@@ -150,3 +181,73 @@ async def list_alerts(
         }
         for a in alerts
     ]
+
+
+@app.post("/v1/analyze")
+async def analyze_trace(
+    trace_id: str,
+    project: Project = Depends(get_project),
+    db: AsyncSession = Depends(get_db),
+):
+    # Fetch the trace
+    result = await db.execute(
+        select(Trace)
+        .where(Trace.project_id == project.id)
+        .where(Trace.id == trace_id)
+        .options(selectinload(Trace.spans))
+    )
+    trace = result.scalar_one_or_none()
+    if not trace:
+        raise HTTPException(status_code=404, detail="Trace not found")
+
+    # Build context
+    spans_summary = []
+    for s in trace.spans:
+        span_info = {
+            "name": s.name,
+            "type": s.span_type,
+            "duration_ms": s.duration_ms,
+            "error": s.error_text,
+        }
+        if s.retrieval_query:
+            span_info["retrieval_query"] = s.retrieval_query
+            span_info["retrieval_scores"] = s.retrieval_scores_json
+        spans_summary.append(span_info)
+
+    prompt = f"""You are an AI agent observability expert. Analyze this failed RAG agent trace and explain:
+1. What went wrong (root cause)
+2. Which span caused the failure
+3. One specific fix the developer should make
+
+Trace name: {trace.name}
+Status: {trace.status}
+Spans: {json.dumps(spans_summary, indent=2)}
+
+Be concise — 3-4 sentences max."""
+
+    # Call local Ollama (mistral)
+    try:
+        req_body = json.dumps({
+            "model": "mistral",
+            "prompt": prompt,
+            "stream": False,
+        }).encode("utf-8")
+
+        req = Request(
+            "http://host.docker.internal:11434/api/generate",
+            data=req_body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read())
+            analysis = data["response"]
+    except Exception as e:
+        analysis = f"Analysis unavailable: {e}"
+
+    return {
+        "trace_id": trace.trace_id,
+        "agent_name": trace.name,
+        "status": trace.status,
+        "analysis": analysis,
+    }
