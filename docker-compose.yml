@@ -35,5 +35,29 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  n8n:
+    image: n8nio/n8n:latest
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=lighthouse123
+      - N8N_ENCRYPTION_KEY=lighthouse-secret-key-32chars!!
+      - EXECUTIONS_DATA_PRUNE=true
+      - EXECUTIONS_DATA_MAX_AGE=7
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n
+      - DB_POSTGRESDB_USER=lighthouse
+      - DB_POSTGRESDB_PASSWORD=lighthouse
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - n8n_data:/home/node/.n8n
+
 volumes:
   pgdata:
+  n8n_data:

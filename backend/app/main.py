@@ -193,7 +193,7 @@ async def analyze_trace(
     result = await db.execute(
         select(Trace)
         .where(Trace.project_id == project.id)
-        .where(Trace.id == trace_id)
+        .where((Trace.id == trace_id) | (Trace.trace_id == trace_id))
         .options(selectinload(Trace.spans))
     )
     trace = result.scalar_one_or_none()
