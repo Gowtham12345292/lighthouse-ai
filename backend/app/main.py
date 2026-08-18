@@ -10,8 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db, engine, Base
 from app.models import Project, Trace, Span, Alert
 from app.schemas import TraceIn, TraceOut
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Lighthouse AI", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")
