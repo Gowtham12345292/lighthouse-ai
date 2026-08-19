@@ -62,6 +62,8 @@ class Span(Base):
     retrieval_chunks_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     retrieval_scores_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     retrieval_top_k: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    retrieval_relevance_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    groundedness_score: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     trace: Mapped["Trace"] = relationship(back_populates="spans")
 

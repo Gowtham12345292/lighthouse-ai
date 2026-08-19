@@ -4,19 +4,21 @@ import threading
 from urllib.request import Request, urlopen
 from datetime import datetime, timezone
 from fastapi import FastAPI, Header, HTTPException, Depends, Query
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db, engine, Base
 from app.models import Project, Trace, Span, Alert
 from app.schemas import TraceIn, TraceOut
-from fastapi.middleware.cors import CORSMiddleware
+from app.metrics import score_span
 
 app = FastAPI(title="Lighthouse AI", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -34,7 +36,6 @@ async def health():
 
 
 def fire_webhook(payload: dict) -> None:
-    """Fire webhook in background thread — never blocks ingest."""
     try:
         data = json.dumps(payload).encode("utf-8")
         req = Request(
@@ -99,6 +100,16 @@ async def ingest_trace(
             retrieval_scores_json=json.dumps(s.retrieval.scores) if s.retrieval and s.retrieval.scores else None,
             retrieval_top_k=s.retrieval.top_k if s.retrieval else None,
         )
+
+        if s.retrieval and s.retrieval.chunks:
+            scores = score_span(
+                retrieval_query=s.retrieval.query,
+                retrieval_chunks_json=json.dumps(s.retrieval.chunks),
+                output_json=json.dumps(s.output) if s.output else None,
+            )
+            span.retrieval_relevance_score = scores["relevance_score"]
+            span.groundedness_score = scores["groundedness_score"]
+
         db.add(span)
 
     if payload.status == "error":
@@ -165,6 +176,38 @@ async def list_traces(
     ]
 
 
+@app.get("/v1/traces/{trace_id}/spans")
+async def get_trace_spans(
+    trace_id: str,
+    project: Project = Depends(get_project),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Trace)
+        .where(Trace.project_id == project.id)
+        .where(Trace.id == trace_id)
+        .options(selectinload(Trace.spans))
+    )
+    trace = result.scalar_one_or_none()
+    if not trace:
+        raise HTTPException(status_code=404, detail="Trace not found")
+
+    return [
+        {
+            "id": s.id,
+            "span_id": s.span_id,
+            "name": s.name,
+            "span_type": s.span_type,
+            "duration_ms": s.duration_ms,
+            "error_text": s.error_text,
+            "retrieval_relevance_score": s.retrieval_relevance_score,
+            "groundedness_score": s.groundedness_score,
+            "retrieval_query": s.retrieval_query,
+        }
+        for s in trace.spans
+    ]
+
+
 @app.get("/v1/alerts")
 async def list_alerts(
     project: Project = Depends(get_project),
@@ -197,7 +240,6 @@ async def analyze_trace(
     project: Project = Depends(get_project),
     db: AsyncSession = Depends(get_db),
 ):
-    # Fetch the trace
     result = await db.execute(
         select(Trace)
         .where(Trace.project_id == project.id)
@@ -208,7 +250,6 @@ async def analyze_trace(
     if not trace:
         raise HTTPException(status_code=404, detail="Trace not found")
 
-    # Build context
     spans_summary = []
     for s in trace.spans:
         span_info = {
@@ -233,7 +274,6 @@ Spans: {json.dumps(spans_summary, indent=2)}
 
 Be concise — 3-4 sentences max."""
 
-    # Call local Ollama (mistral)
     try:
         req_body = json.dumps({
             "model": "mistral",
